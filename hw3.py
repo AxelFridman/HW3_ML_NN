@@ -13,6 +13,7 @@ import torch.nn.functional as F
 from joblib import Parallel, delayed
 from matplotlib.colors import to_rgb
 from matplotlib.patches import FancyBboxPatch, Polygon
+from matplotlib.ticker import MaxNLocator
 from sklearn.model_selection import StratifiedKFold
 from torch.utils.flop_counter import FlopCounterMode
 from torchvision.datasets import CIFAR10
@@ -212,6 +213,7 @@ def band(ax, runs, key, color, label=None, ls='-', k=1):
     e, m, s = np.arange(1, v.shape[1] + 1), v.mean(0), v.std(0, ddof=1)
     ax.fill_between(e, m - s, m + s, color=color, alpha=.2, lw=0)
     ax.plot(e, m, ls, color=color, label=label)
+    ax.xaxis.set_major_locator(MaxNLocator(integer=True))
 
 
 def curves(groups, axes):
@@ -246,12 +248,12 @@ def draw(ax, layers, img=None):
         right = 1.2
     for shape, cap, c in layers:
         if isinstance(shape, str):
-            w, h, d, dims = .2 + .088 * max(map(len, shape.split('\n'))), .8, 0, ''
+            w, h, d, dims = .25 + .11 * max(map(len, shape.split('\n'))), .8, 0, ''
         else:
             n, s = shape if isinstance(shape, tuple) else (shape, 0)
             w, h, d = (.055 * n ** .5, .26 * s ** .5, .078 * s ** .5) if s else (.1, .17 * math.log2(n), .06)
             dims = f'{s}×{s}×{n}' if s else f'{n}'
-        x = right + pad + .36 + (pad := max(0, .095 * max(len(cap), len(dims)) - w - d) / 2)
+        x = right + pad + .36 + (pad := max(0, .105 * max(len(cap), len(dims)) - w - d) / 2)
         ax.annotate('', (x - .05, 0), (right + .05, 0), arrowprops=dict(arrowstyle='-|>', color=MUTED, lw=.8))
         if isinstance(shape, str):
             ax.add_patch(FancyBboxPatch((x, -h / 2), w, h, 'round,pad=0,rounding_size=.08', fc=c, ec='none'))
