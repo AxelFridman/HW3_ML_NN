@@ -22,6 +22,7 @@ SEED, FOLDS, BATCH, JOBS = 18042001, 5, 128, 4
 ROOT = os.path.dirname(os.path.abspath(__file__))
 DATA, OUT = os.path.join(ROOT, 'data'), os.path.join(ROOT, 'out')
 FIGS, RUNS = os.path.join(OUT, 'figs'), os.path.join(OUT, 'runs')
+BEST, DINO = os.path.join(OUT, 'best.json'), os.path.join(DATA, 'dino.pt')
 os.makedirs(FIGS, exist_ok=True)
 CLASSES = 'airplane automobile bird cat deer dog frog horse ship truck'.split()
 MEAN = torch.tensor([.4914, .4822, .4465]).view(1, 3, 1, 1)
@@ -29,14 +30,14 @@ STD = torch.tensor([.2470, .2435, .2616]).view(1, 3, 1, 1)
 PERM = torch.randperm(1024, generator=torch.Generator().manual_seed(SEED))
 AUG = {'all': ('crop', 'rotation', 'zoom', 'h-flip', 'v-flip'), 'novflip': ('crop', 'rotation', 'zoom', 'h-flip')}
 
-INK, TEXT, MUTED = '#0b0b0b', '#52514e', '#898781'
-COL = dict(mlp='#eb6834', cnn='#2a78d6', attn='#1baf7a', dino='#6250d6', large='#e34948', dropout='#008300',
-           wd='#eda100', novflip='#008300', all='#e87ba4')
-plt.rcParams.update({'font.size': 10, 'axes.titlesize': 10, 'legend.fontsize': 9, 'lines.linewidth': 1.8,
+INK, TEXT, MUTED, RED = '#0b0b0b', '#52514e', '#898781', '#e34948'
+COL = dict(mlp='#eb6834', cnn='#2a78d6', attn='#1baf7a', dino='#6250d6', large=RED, dropout='#008300', wd='#6250d6',
+           novflip='#008300', all='#e87ba4')
+plt.rcParams.update({'font.size': 8, 'axes.titlesize': 8.5, 'legend.fontsize': 7.5, 'lines.linewidth': 1.5,
                      'axes.spines.top': False, 'axes.spines.right': False, 'axes.edgecolor': '#c3c2b7',
                      'xtick.color': TEXT, 'ytick.color': TEXT, 'axes.grid': True, 'grid.color': '#ebeae5',
-                     'axes.axisbelow': True, 'legend.frameon': False, 'figure.dpi': 110, 'savefig.bbox': 'tight',
-                     'pdf.fonttype': 42})
+                     'axes.axisbelow': True, 'legend.frameon': False, 'figure.dpi': 130, 'savefig.bbox': 'tight',
+                     'figure.constrained_layout.use': True, 'pdf.fonttype': 42})
 
 
 @cache
@@ -55,19 +56,20 @@ def folds():
 def inputs(kind):
     X, Y, Xte, Yte = cifar()
     if kind == 'dino':
-        Z = torch.load(os.path.join(DATA, 'dino.pt'))
+        Z = torch.load(DINO)
         return Z['train'], Y, Z['test'], Yte
     return X, Y, Xte, Yte
 
 
-def augment(x, ops, p=.5):
-    n, u = len(x), lambda a, b: torch.empty(len(x)).uniform_(a, b)
+def augment(x, ops, fixed=False):
+    n = len(x)
+    u = lambda a, b: torch.full((n,), float(b)) if fixed else torch.empty(n).uniform_(a, b)
     a = torch.deg2rad(u(-15, 15)) * ('rotation' in ops)
-    s = u(.7, 1) if 'zoom' in ops else torch.ones(n)
-    fx, fy = (torch.where((torch.rand(n) < p) & (k in ops), -1., 1.) for k in ('h-flip', 'v-flip'))
-    t = torch.randint(-4, 5, (n, 2)) / 16 * ('crop' in ops)
+    s = 1 - u(0, .3) * ('zoom' in ops)
+    fx, fy = (torch.where(((torch.rand(n) < .5) | fixed) & (k in ops), -1., 1.) for k in ('h-flip', 'v-flip'))
+    t = (torch.full((n, 2), 4) if fixed else torch.randint(-4, 5, (n, 2))) * 2 / x.shape[-1] * ('crop' in ops)
     theta = torch.stack([s * a.cos() * fx, -s * a.sin() * fy, t[:, 0], s * a.sin() * fx, s * a.cos() * fy, t[:, 1]], 1)
-    return F.grid_sample(x.float(), F.affine_grid(theta.view(n, 2, 3), x.shape, False), align_corners=False)
+    return F.grid_sample(x.float(), F.affine_grid(theta.view(n, 2, 3), x.shape, align_corners=False), align_corners=False)
 
 
 def prep(x, kind='pixels'):
@@ -98,7 +100,7 @@ class AttnCNN(nn.Module):
         super().__init__()
         d = 4 * w
         self.cnn = nn.Sequential(block(3, w), block(w, 2 * w), *block(2 * w, d)[:3])
-        self.cls, self.pos = nn.Parameter(torch.zeros(1, 1, d)), nn.Parameter(torch.randn(1, 65, d) / 50)
+        self.cls, self.pos = nn.Parameter(torch.zeros(1, 1, d)), nn.Parameter(torch.randn(1, 1 + 8 * 8, d) * .02)
         self.norm, self.attn = nn.LayerNorm(d), nn.MultiheadAttention(d, heads, batch_first=True)
         self.mlp = nn.Sequential(nn.LayerNorm(d), nn.Linear(d, fc), nn.GELU(), nn.Linear(fc, 10))
 
@@ -134,26 +136,22 @@ def train(name, fold, model, epochs=10, lr=1e-3, wd=0., aug=None, kind='pixels')
     log = []
     for _ in range(epochs):
         net.train()
-        t, s = time.perf_counter(), np.zeros(3)
+        t = time.perf_counter()
         for i in tr[torch.randperm(len(tr))].split(BATCH):
-            x, y = X[i], Y[i]
-            if aug:
-                x = augment(x, AUG[aug])
-            out = net(prep(x, kind))
-            loss = F.cross_entropy(out, y)
+            loss = F.cross_entropy(net(prep(augment(X[i], AUG[aug]) if aug else X[i], kind)), Y[i])
             opt.zero_grad()
             loss.backward()
             opt.step()
             sched.step()
-            s += loss.item() * len(y), (out.argmax(1) == y).sum().item(), len(y)
         t = time.perf_counter() - t
-        log.append([s[0] / s[2], s[1] / s[2], *evaluate(net, X[va], Y[va], kind)[:2], t, wnorm(net)])
+        log.append([*evaluate(net, X[tr[::4]], Y[tr[::4]], kind)[:2], *evaluate(net, X[va], Y[va], kind)[:2], t, wnorm(net)])
     loss, acc, pred = evaluate(net, Xte, Yte, kind)
     res = dict(zip(('train_loss', 'train_acc', 'val_loss', 'val_acc', 'time', 'wnorm'), torch.tensor(log).T))
     os.makedirs(d := os.path.join(RUNS, name), exist_ok=True)
     torch.save(net.state_dict(), os.path.join(d, f'{fold}.pth'))
     torch.save(res | dict(test_loss=loss, test_acc=acc, pred=pred.byte(), params=sum(p.numel() for p in net.parameters())),
-               os.path.join(d, f'{fold}.pt'))
+               tmp := os.path.join(d, f'{fold}.tmp'))
+    os.replace(tmp, os.path.join(d, f'{fold}.pt'))
 
 
 def cv(specs):
@@ -180,24 +178,29 @@ def profile(model, kind='pixels', steps=20):
     for h in hooks:
         h.remove()
     opt = torch.optim.AdamW(net.parameters())
-    for i in range(steps + 3):
-        if i == 3:
+    for i in range(-3, steps):
+        if i == 0:
             t = time.perf_counter()
         opt.zero_grad()
         F.cross_entropy(net(x), y).backward()
         opt.step()
     n = sum(p.numel() for p in net.parameters())
-    return dict(params=n, mflops=flops.get_total_flops() / BATCH / 1e6, epoch=(time.perf_counter() - t) / steps * 40000 / BATCH,
-                weights=4 * n / 2 ** 20, adam=12 * n / 2 ** 20, acts=4 * sum(acts) / 2 ** 20)
+    return dict(params=n, mflops=flops.get_total_flops() / BATCH / 1e6, weights=4 * n / 2 ** 20, adam=12 * n / 2 ** 20,
+                acts=4 * sum(acts) / 2 ** 20, epoch=(time.perf_counter() - t) / steps * len(X) * (FOLDS - 1) / FOLDS / BATCH)
 
 
-def col(runs, key):
+def last(runs, key):
     return np.array([np.ravel(r[key])[-1] for r in runs], float)
 
 
 def ms(v, k=100, d=1):
     v = np.asarray(v, float) * k
     return f'{v.mean():.{d}f} ({v.std(ddof=1):.{d}f})'
+
+
+def pdiff(a, b, key='test_acc'):
+    d = last(a, key) - last(b, key)
+    return f'{ms(d)}, {(d > 0).sum()}/{len(d)} folds'
 
 
 def mix(c, t='white', a=.5):
@@ -211,8 +214,7 @@ def band(ax, runs, key, color, label=None, ls='-', k=1):
     ax.plot(e, m, ls, color=color, label=label)
 
 
-def curves(groups, axes=None):
-    axes = plt.subplots(1, 2, figsize=(9, 3.2))[1] if axes is None else axes
+def curves(groups, axes):
     for label, (runs, color) in groups.items():
         for ax, m, k in zip(axes, ('loss', 'acc'), (1, 100)):
             band(ax, runs, f'train_{m}', color, None, '--', k)
@@ -221,8 +223,7 @@ def curves(groups, axes=None):
         axes[0].plot([], [], ls, color=MUTED, label=label)
     axes[0].set(xlabel='epoch', ylabel='cross-entropy loss')
     axes[1].set(xlabel='epoch', ylabel='accuracy (%)')
-    axes[0].legend()
-    return axes
+    axes[0].figure.legend(*axes[0].get_legend_handles_labels(), loc='outside upper center', ncol=len(groups) + 2)
 
 
 def tiles(ax, x, nrow=8):
@@ -237,34 +238,43 @@ def cnn_layers(w=32, fc=256):
             (10, 'softmax', INK)]
 
 
-def draw(layers, img=None, ax=None):
-    ax = ax or plt.subplots(figsize=(11, 2.4))[1]
-    x = 0
+def draw(ax, layers, img=None):
+    right, pad = 0, 0
     if img is not None:
         ax.imshow(img.permute(1, 2, 0), extent=(0, 1.2, -.6, .6))
-        ax.text(.6, -.68, '32×32×3', ha='center', va='top', fontsize=7.5, color=TEXT)
-        x = 1.2
+        ax.text(.6, -.68, '32×32×3', ha='center', va='top', fontsize=6.5, color=TEXT)
+        right = 1.2
     for shape, cap, c in layers:
-        ax.annotate('', (x + .42, 0), (x + .08, 0), arrowprops=dict(arrowstyle='-|>', color=MUTED, lw=.8))
-        x += .5
         if isinstance(shape, str):
             w, h, d, dims = .2 + .088 * max(map(len, shape.split('\n'))), .8, 0, ''
-            ax.add_patch(FancyBboxPatch((x, -h / 2), w, h, 'round,pad=0,rounding_size=.08', fc=c, ec='none'))
-            ax.text(x + w / 2, 0, shape, ha='center', va='center', fontsize=8, color='white')
         else:
             n, s = shape if isinstance(shape, tuple) else (shape, 0)
             w, h, d = (.055 * n ** .5, .26 * s ** .5, .078 * s ** .5) if s else (.1, .17 * math.log2(n), .06)
             dims = f'{s}×{s}×{n}' if s else f'{n}'
+        x = right + pad + .36 + (pad := max(0, .095 * max(len(cap), len(dims)) - w - d) / 2)
+        ax.annotate('', (x - .05, 0), (right + .05, 0), arrowprops=dict(arrowstyle='-|>', color=MUTED, lw=.8))
+        if isinstance(shape, str):
+            ax.add_patch(FancyBboxPatch((x, -h / 2), w, h, 'round,pad=0,rounding_size=.08', fc=c, ec='none'))
+            ax.text(x + w / 2, 0, shape, ha='center', va='center', fontsize=7, color='white')
+        else:
             for f, k in (([(0, 0), (w, 0), (w, h), (0, h)], 0), ([(0, h), (w, h), (w + d, h + d), (d, h + d)], .35),
                          ([(w, 0), (w + d, d), (w + d, h + d), (w, h)], -.25)):
                 ax.add_patch(Polygon([(x + a, b - h / 2) for a, b in f], fc=mix(c, 'white' if k > 0 else 'black', abs(k)),
                                      ec='white', lw=.5))
-        ax.text(x + w / 2, -h / 2 - .08, dims, ha='center', va='top', fontsize=7.5, color=TEXT)
-        ax.text(x + (w + d) / 2, h / 2 + d + .06, cap, ha='center', va='bottom', fontsize=8, color=INK)
-        x += w + d
-    ax.set(xlim=(-.05, x + .1), ylim=(-1.35, 1.5), aspect='equal')
+        ax.text(x + w / 2, -h / 2 - .08, dims, ha='center', va='top', fontsize=6.5, color=TEXT)
+        ax.text(x + (w + d) / 2, h / 2 + d + .06, cap, ha='center', va='bottom', fontsize=7, color=INK)
+        right = x + w + d
+    ax.set(ylim=(-1.35, 1.5), aspect='equal')
     ax.axis('off')
-    return ax
+    return right + pad + .1
+
+
+def diagram(name, rows, img=None):
+    fig, axes = plt.subplots(len(rows), 1, figsize=(7.2, 1.5 * len(rows)), squeeze=False)
+    end = max(draw(ax, layers, img) for ax, layers in zip(axes[:, 0], rows))
+    for ax in axes[:, 0]:
+        ax.set_xlim(-.05, end)
+    save(fig, name)
 
 
 def save(fig, name):
@@ -274,3 +284,8 @@ def save(fig, name):
 def tex(name, **kv):
     with open(os.path.join(OUT, f'{name}.tex'), 'w') as f:
         f.writelines(f'\\newcommand{{\\{k}}}{{{v}}}\n' for k, v in kv.items())
+
+
+def rows(name, df):
+    with open(os.path.join(OUT, f'{name}.tex'), 'w') as f:
+        f.writelines(' & '.join(map(str, r)) + ' \\\\\n' for r in df.itertuples())
