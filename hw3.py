@@ -1,6 +1,7 @@
 import json
 import math
 import os
+import re
 import time
 from functools import cache, partial
 
@@ -254,7 +255,8 @@ def draw(ax, layers, img=None):
             w, h, d = (.055 * n ** .5, .26 * s ** .5, .078 * s ** .5) if s else (.1, .17 * math.log2(n), .06)
             dims = f'{s}×{s}×{n}' if s else f'{n}'
         x = right + pad + .36 + (pad := max(0, .105 * max(len(cap), len(dims)) - w - d) / 2)
-        ax.annotate('', (x - .05, 0), (right + .05, 0), arrowprops=dict(arrowstyle='-|>', color=MUTED, lw=.8))
+        if right:
+            ax.annotate('', (x - .05, 0), (right + .05, 0), arrowprops=dict(arrowstyle='-|>', color=MUTED, lw=.8))
         if isinstance(shape, str):
             ax.add_patch(FancyBboxPatch((x, -h / 2), w, h, 'round,pad=0,rounding_size=.08', fc=c, ec='none'))
             ax.text(x + w / 2, 0, shape, ha='center', va='center', fontsize=7, color='white')
@@ -284,8 +286,9 @@ def save(fig, name):
 
 
 def tex(name, **kv):
+    neg = lambda v: re.sub(r'(?<!\d)-(?=\d)', '$-$', str(v))
     with open(os.path.join(OUT, f'{name}.tex'), 'w') as f:
-        f.writelines(f'\\newcommand{{\\{k}}}{{{v}}}\n' for k, v in kv.items())
+        f.writelines(f'\\newcommand{{\\{k}}}{{{neg(v)}}}\n' for k, v in kv.items())
 
 
 def rows(name, df):
