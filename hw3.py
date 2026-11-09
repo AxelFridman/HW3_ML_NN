@@ -16,7 +16,6 @@ from matplotlib.colors import to_rgb
 from matplotlib.patches import FancyBboxPatch, Polygon
 from matplotlib.ticker import MaxNLocator
 from sklearn.model_selection import StratifiedKFold
-from torch.utils.flop_counter import FlopCounterMode
 from torchvision.datasets import CIFAR10
 from torchvision.utils import make_grid
 
@@ -34,7 +33,7 @@ PERM = torch.randperm(1024, generator=torch.Generator().manual_seed(SEED))
 OPS = ('crop', 'rotation', 'zoom', 'h-flip', 'v-flip')
 
 INK, TEXT, MUTED, RED = '#0b0b0b', '#52514e', '#898781', '#e34948'
-COL = dict(mlp='#eb6834', cnn='#2a78d6', attn='#1baf7a', dino='#6250d6', large=RED, dropout='#008300', wd='#eda100',
+COL = dict(mlp='#eb6834', cnn='#2a78d6', dino='#6250d6', large=RED, dropout='#008300', wd='#eda100',
            crop='#eda100', novflip='#008300', all='#e87ba4')
 plt.rcParams.update({'font.size': 8, 'axes.titlesize': 8.5, 'legend.fontsize': 7.5, 'lines.linewidth': 1.5,
                      'axes.spines.top': False, 'axes.spines.right': False, 'axes.edgecolor': '#c3c2b7',
@@ -96,24 +95,6 @@ def MLP(hidden=(512, 256), p=0., d=3072):
 def CNN(w=32, fc=256, p=0.):
     return nn.Sequential(block(3, w), block(w, 2 * w), block(2 * w, 4 * w), nn.Flatten(), nn.Dropout(p),
                          nn.Linear(64 * w, fc), nn.ReLU(), nn.Dropout(p), nn.Linear(fc, 10))
-
-
-class AttnCNN(nn.Module):
-    def __init__(self, w=32, heads=4, fc=256):
-        super().__init__()
-        d = 4 * w
-        self.cnn = nn.Sequential(block(3, w), block(w, 2 * w), *block(2 * w, d)[:3])
-        self.cls, self.pos = nn.Parameter(torch.zeros(1, 1, d)), nn.Parameter(torch.randn(1, 1 + 8 * 8, d) * .02)
-        self.norm, self.attn = nn.LayerNorm(d), nn.MultiheadAttention(d, heads, batch_first=True)
-        self.mlp = nn.Sequential(nn.LayerNorm(d), nn.Linear(d, fc), nn.GELU(), nn.Linear(fc, 10))
-
-    def forward(self, x, maps=False):
-        t = self.cnn(x).flatten(2).transpose(1, 2)
-        t = torch.cat([self.cls.expand(len(t), -1, -1), t], 1) + self.pos
-        n = self.norm(t)
-        a, w = self.attn(n[:, :1], n, n, need_weights=maps)
-        y = self.mlp(t[:, 0] + a[:, 0])
-        return (y, w[:, 0, 1:]) if maps else y
 
 
 @torch.no_grad()
@@ -180,7 +161,7 @@ def profile(model, kind='pixels', steps=30):
             acts[t.data_ptr()] = t.nbytes
         return t
 
-    with FlopCounterMode(display=False) as flops, torch.autograd.graph.saved_tensors_hooks(keep, lambda t: t):
+    with torch.autograd.graph.saved_tensors_hooks(keep, lambda t: t):
         net(x)
     opt = torch.optim.AdamW(net.parameters())
     for _ in range(steps + 3):
@@ -190,7 +171,7 @@ def profile(model, kind='pixels', steps=30):
         opt.step()
         ts.append(time.perf_counter() - t)
     n = sum(p.numel() for p in net.parameters())
-    return dict(params=n, mflops=flops.get_total_flops() / BATCH / 1e6, weights=4 * n / 2 ** 20, adam=12 * n / 2 ** 20,
+    return dict(params=n, weights=4 * n / 2 ** 20, adam=12 * n / 2 ** 20,
                 acts=sum(acts.values()) / 2 ** 20, epoch=min(ts[3:]) * len(X) * (FOLDS - 1) / FOLDS / BATCH)
 
 

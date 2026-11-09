@@ -1,13 +1,13 @@
-# HW3: MLP, CNN and hybrids on CIFAR-10
+# HW3: MLP and CNN on CIFAR-10
 
 Axel Fridman and Abdulhamit Gokce, Machine Learning & Neural Networks for Neuroscience, Bar-Ilan University.
 
 | File | Task |
 |---|---|
 | [`1_mlp_vs_cnn.ipynb`](1_mlp_vs_cnn.ipynb) | MLP vs CNN: hyperparameter search, accuracy, size, speed, memory, weights, shuffled pixels |
-| [`2_overfitting.ipynb`](2_overfitting.ipynb) | A larger CNN overfits: onset by a generalization-loss threshold; dropout vs weight decay |
+| [`2_overfitting.ipynb`](2_overfitting.ipynb) | Small, base and large CNN: when overfitting begins; dropout vs weight decay on the FC layers |
 | [`3_augmentation.ipynb`](3_augmentation.ipynb) | Crop, rotation, zoom and flips, each alone and combined; learning curves, confusion matrices |
-| [`4_hybrids.ipynb`](4_hybrids.ipynb) | CNN features + one self-attention layer + MLP; frozen DINOv2-small embeddings + MLP |
+| [`4_embeddings.ipynb`](4_embeddings.ipynb) | Frozen DINOv2-small embeddings + a small MLP, compared with the Task 1 models; t-SNE |
 | [`hw3.py`](hw3.py) | Data, folds, models, training loop, plots |
 
 Every experiment uses 5-fold cross-validation on the 50,000 training images (folds of 10,000): each fold's model trains on
