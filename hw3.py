@@ -21,6 +21,7 @@ from torchvision.datasets import CIFAR10
 from torchvision.utils import make_grid
 
 SEED, FOLDS, BATCH, JOBS = 18042001, 5, 128, 4
+os.environ.setdefault('LOKY_MAX_CPU_COUNT', str(JOBS))
 ROOT = os.path.dirname(os.path.abspath(__file__))
 DATA, OUT = os.path.join(ROOT, 'data'), os.path.join(ROOT, 'out')
 FIGS, RUNS = os.path.join(OUT, 'figs'), os.path.join(OUT, 'runs')
@@ -30,11 +31,11 @@ CLASSES = 'airplane automobile bird cat deer dog frog horse ship truck'.split()
 MEAN = torch.tensor([.4914, .4822, .4465]).view(1, 3, 1, 1)
 STD = torch.tensor([.2470, .2435, .2616]).view(1, 3, 1, 1)
 PERM = torch.randperm(1024, generator=torch.Generator().manual_seed(SEED))
-AUG = {'all': ('crop', 'rotation', 'zoom', 'h-flip', 'v-flip'), 'novflip': ('crop', 'rotation', 'zoom', 'h-flip')}
+OPS = ('crop', 'rotation', 'zoom', 'h-flip', 'v-flip')
 
 INK, TEXT, MUTED, RED = '#0b0b0b', '#52514e', '#898781', '#e34948'
-COL = dict(mlp='#eb6834', cnn='#2a78d6', attn='#1baf7a', dino='#6250d6', large=RED, dropout='#008300', wd='#6250d6',
-           novflip='#008300', all='#e87ba4')
+COL = dict(mlp='#eb6834', cnn='#2a78d6', attn='#1baf7a', dino='#6250d6', large=RED, dropout='#008300', wd='#eda100',
+           crop='#eda100', novflip='#008300', all='#e87ba4')
 plt.rcParams.update({'font.size': 8, 'axes.titlesize': 8.5, 'legend.fontsize': 7.5, 'lines.linewidth': 1.5,
                      'axes.spines.top': False, 'axes.spines.right': False, 'axes.edgecolor': '#c3c2b7',
                      'xtick.color': TEXT, 'ytick.color': TEXT, 'axes.grid': True, 'grid.color': '#ebeae5',
@@ -126,7 +127,7 @@ def wnorm(net):
     return math.sqrt(sum(p.detach().square().sum().item() for p in net.parameters() if p.dim() > 1))
 
 
-def train(name, fold, model, epochs=10, lr=1e-3, wd=0., aug=None, kind='pixels'):
+def train(name, fold, model, epochs=10, lr=1e-3, wd=0., aug=(), kind='pixels'):
     torch.set_num_threads(1)
     torch.manual_seed(SEED + fold)
     X, Y, Xte, Yte = inputs(kind)
@@ -140,7 +141,7 @@ def train(name, fold, model, epochs=10, lr=1e-3, wd=0., aug=None, kind='pixels')
         net.train()
         t = time.perf_counter()
         for i in tr[torch.randperm(len(tr))].split(BATCH):
-            loss = F.cross_entropy(net(prep(augment(X[i], AUG[aug]) if aug else X[i], kind)), Y[i])
+            loss = F.cross_entropy(net(prep(augment(X[i], aug) if aug else X[i], kind)), Y[i])
             opt.zero_grad()
             loss.backward()
             opt.step()
@@ -163,46 +164,50 @@ def cv(specs):
     return {k: [torch.load(path(k, f)) for f in range(FOLDS)] for k in specs}
 
 
-def load(name, model, fold=0):
+def load(name, model):
     net = model()
-    net.load_state_dict(torch.load(os.path.join(RUNS, name, f'{fold}.pth')))
+    net.load_state_dict(torch.load(os.path.join(RUNS, name, '0.pth')))
     return net.eval()
 
 
-def profile(model, kind='pixels', steps=20):
+def profile(model, kind='pixels', steps=30):
     torch.set_num_threads(4)
     X, Y, *_ = inputs(kind)
-    x, y, acts = prep(X[:BATCH], kind), Y[:BATCH], []
+    x, y = prep(X[:BATCH], kind), Y[:BATCH]
     net = model().to(memory_format=torch.channels_last)
-    hooks = [m.register_forward_hook(lambda m, i, o: acts.append(o.numel())) for m in net.modules() if not [*m.children()]]
-    with FlopCounterMode(display=False) as flops:
+    own, acts, ts = {p.data_ptr() for p in net.parameters()}, {}, []
+
+    def keep(t):
+        if t.data_ptr() not in own:
+            acts[t.data_ptr()] = t.nbytes
+        return t
+
+    with FlopCounterMode(display=False) as flops, torch.autograd.graph.saved_tensors_hooks(keep, lambda t: t):
         net(x)
-    for h in hooks:
-        h.remove()
     opt = torch.optim.AdamW(net.parameters())
-    for i in range(-3, steps):
-        if i == 0:
-            t = time.perf_counter()
+    for _ in range(steps + 3):
+        t = time.perf_counter()
         opt.zero_grad()
         F.cross_entropy(net(x), y).backward()
         opt.step()
+        ts.append(time.perf_counter() - t)
     n = sum(p.numel() for p in net.parameters())
     return dict(params=n, mflops=flops.get_total_flops() / BATCH / 1e6, weights=4 * n / 2 ** 20, adam=12 * n / 2 ** 20,
-                acts=4 * sum(acts) / 2 ** 20, epoch=(time.perf_counter() - t) / steps * len(X) * (FOLDS - 1) / FOLDS / BATCH)
+                acts=sum(acts.values()) / 2 ** 20, epoch=min(ts[3:]) * len(X) * (FOLDS - 1) / FOLDS / BATCH)
 
 
 def last(runs, key):
     return np.array([np.ravel(r[key])[-1] for r in runs], float)
 
 
-def ms(v, k=100, d=1):
+def ms(v, k=100, d=1, sign=''):
     v = np.asarray(v, float) * k
-    return f'{v.mean():.{d}f} ({v.std(ddof=1):.{d}f})'
+    return f'{v.mean():{sign}.{d}f} ({v.std(ddof=1):.{d}f})'
 
 
 def pdiff(a, b, key='test_acc'):
     d = last(a, key) - last(b, key)
-    return f'{ms(d)}, {(d > 0).sum()}/{len(d)} folds'
+    return f'{ms(d, sign="+")}, {(d > 0).sum()}/{len(d)} folds'
 
 
 def mix(c, t='white', a=.5):
@@ -238,7 +243,7 @@ def tiles(ax, x, nrow=8):
 def cnn_layers(w=32, fc=256):
     return [((w, 32), 'conv 3×3', COL['cnn']), ((2 * w, 16), 'conv 3×3', COL['cnn']), ((4 * w, 8), 'conv 3×3', COL['cnn']),
             ((4 * w, 4), 'max-pool', mix(COL['cnn'])), (64 * w, 'flatten', MUTED), (fc, 'FC + ReLU', COL['mlp']),
-            (10, 'softmax', INK)]
+            (10, 'FC + softmax', INK)]
 
 
 def draw(ax, layers, img=None):
@@ -285,12 +290,15 @@ def save(fig, name):
     fig.savefig(os.path.join(FIGS, f'{name}.pdf'))
 
 
+def neg(v):
+    return re.sub(r'(?<!\d)-(?=\d)', '$-$', str(v))
+
+
 def tex(name, **kv):
-    neg = lambda v: re.sub(r'(?<!\d)-(?=\d)', '$-$', str(v))
     with open(os.path.join(OUT, f'{name}.tex'), 'w') as f:
         f.writelines(f'\\newcommand{{\\{k}}}{{{neg(v)}}}\n' for k, v in kv.items())
 
 
 def rows(name, df):
     with open(os.path.join(OUT, f'{name}.tex'), 'w') as f:
-        f.writelines(' & '.join(map(str, r)) + ' \\\\\n' for r in df.itertuples())
+        f.writelines(' & '.join(map(neg, r)) + ' \\\\\n' for r in df.itertuples())
