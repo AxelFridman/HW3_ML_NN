@@ -123,10 +123,6 @@ def evaluate(net, X, Y, kind='pixels'):
     return F.cross_entropy(out, Y).item(), (out.argmax(1) == Y).float().mean().item(), out.argmax(1)
 
 
-def wnorm(net):
-    return math.sqrt(sum(p.detach().square().sum().item() for p in net.parameters() if p.dim() > 1))
-
-
 def train(name, fold, model, epochs=10, lr=1e-3, wd=0., aug=(), kind='pixels'):
     torch.set_num_threads(1)
     torch.manual_seed(SEED + fold)
@@ -134,7 +130,9 @@ def train(name, fold, model, epochs=10, lr=1e-3, wd=0., aug=(), kind='pixels'):
     va = folds()[fold]
     tr = torch.from_numpy(np.setdiff1d(np.arange(len(Y)), va))
     net = model().to(memory_format=torch.channels_last)
-    opt = torch.optim.AdamW(net.parameters(), lr, weight_decay=wd)
+    fc = {id(p) for m in net.modules() if isinstance(m, nn.Linear) for p in m.parameters()}
+    opt = torch.optim.AdamW([dict(params=[p for p in net.parameters() if id(p) in fc], weight_decay=wd),
+                             dict(params=[p for p in net.parameters() if id(p) not in fc], weight_decay=0.)], lr)
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, lr, total_steps=epochs * math.ceil(len(tr) / BATCH))
     log = []
     for _ in range(epochs):
@@ -147,9 +145,9 @@ def train(name, fold, model, epochs=10, lr=1e-3, wd=0., aug=(), kind='pixels'):
             opt.step()
             sched.step()
         t = time.perf_counter() - t
-        log.append([*evaluate(net, X[tr[::4]], Y[tr[::4]], kind)[:2], *evaluate(net, X[va], Y[va], kind)[:2], t, wnorm(net)])
+        log.append([*evaluate(net, X[tr[::4]], Y[tr[::4]], kind)[:2], *evaluate(net, X[va], Y[va], kind)[:2], t])
     loss, acc, pred = evaluate(net, Xte, Yte, kind)
-    res = dict(zip(('train_loss', 'train_acc', 'val_loss', 'val_acc', 'time', 'wnorm'), torch.tensor(log).T))
+    res = dict(zip(('train_loss', 'train_acc', 'val_loss', 'val_acc', 'time'), torch.tensor(log).T))
     os.makedirs(d := os.path.join(RUNS, name), exist_ok=True)
     torch.save(net.state_dict(), os.path.join(d, f'{fold}.pth'))
     torch.save(res | dict(test_loss=loss, test_acc=acc, pred=pred.byte(), params=sum(p.numel() for p in net.parameters())),
