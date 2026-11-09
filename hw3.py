@@ -241,9 +241,9 @@ def tiles(ax, x, nrow=8):
 
 
 def cnn_layers(w=32, fc=256):
-    return [((w, 32), 'conv 3×3', COL['cnn']), ((2 * w, 16), 'conv 3×3', COL['cnn']), ((4 * w, 8), 'conv 3×3', COL['cnn']),
-            ((4 * w, 4), 'max-pool', mix(COL['cnn'])), (64 * w, 'flatten', MUTED), (fc, 'FC + ReLU', COL['mlp']),
-            (10, 'FC + softmax', INK)]
+    return [b for i in range(3) for b in (((w << i, 32 >> i), 'conv 3×3', COL['cnn']),
+                                          ((w << i, 16 >> i), 'max-pool', mix(COL['cnn'])))] + [
+        (64 * w, 'flatten', MUTED), (fc, 'FC + ReLU', COL['mlp']), (10, 'FC + softmax', INK)]
 
 
 def draw(ax, layers, img=None):
